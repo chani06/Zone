@@ -379,7 +379,7 @@ def _build_coord_checker():
         return None
 
 
-@st.cache_data(show_spinner="📂 โหลดข้อมูล…")
+@st.cache_data(show_spinner="📂 โหลดข้อมูล…", ttl=3600)
 def load_and_classify() -> pd.DataFrame:
     if not os.path.exists(BRANCH_JSON):
         return pd.DataFrame()
