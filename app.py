@@ -266,9 +266,12 @@ def _build_coord_checker():
                 if not g.is_valid:
                     g = g.buffer(0)
                 props = feat.get("properties", {})
-                # GADM: NL_NAME_* = ชื่อไทย (อาจมี prefix "จังหวัด"/"อำเภอ")
-                pv = str(props.get("NL_NAME_1") or props.get("NAME_1") or "").strip()
-                dv = str(props.get("NL_NAME_2") or props.get("NAME_2") or "").strip()
+                # GADM: NL_NAME_* = ชื่อไทย — ใช้เฉพาะถ้าเป็นภาษาไทย (มีอักขระไทย)
+                def _thai_only(s):
+                    s = str(s or "").strip()
+                    return s if any("\u0e00" <= c <= "\u0e7f" for c in s) else ""
+                pv = _thai_only(props.get("NL_NAME_1")) or _thai_only(props.get("NAME_1"))
+                dv = _thai_only(props.get("NL_NAME_2")) or _thai_only(props.get("NAME_2"))
                 shp_list.append(g)
                 prov_list.append(_norm_prov(pv))
                 dist_list.append(_norm_dist(dv))
@@ -302,14 +305,16 @@ def _build_coord_checker():
 
             warns = []
             # ── ตรวจจังหวัด ────────────────────────────────────────────────
+            prov_ok = True
             if actual_prov and rec_pn:
                 bkk_actual = actual_prov in _BKK_ALIAS or "กรุงเทพ" in actual_prov
                 bkk_rec    = rec_pn    in _BKK_ALIAS or "กรุงเทพ" in rec_pn
                 if not (bkk_actual and bkk_rec) and actual_prov != rec_pn:
                     warns.append(f"พิกัดอยู่ในจังหวัด '{actual_prov}' แต่บันทึก '{rec_pn}'")
+                    prov_ok = False
 
-            # ── ตรวจอำเภอ/เขต ──────────────────────────────────────────────
-            if actual_dist and rec_dn and actual_dist != rec_dn:
+            # ── ตรวจอำเภอ/เขต (เฉพาะเมื่อจังหวัดตรงกัน) ─────────────────
+            if prov_ok and actual_dist and rec_dn and actual_dist != rec_dn:
                 warns.append(f"อำเภอจากพิกัด '{actual_dist}' ≠ บันทึก '{rec_dn}'")
 
             if warns:
