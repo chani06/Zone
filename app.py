@@ -240,6 +240,42 @@ def _prov_key(zone: str) -> str:
     return "_".join(parts[:2]) if len(parts) >= 3 else zone
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+# ADDRESS VALIDATION
+# ════════════════════════════════════════════════════════════════════════════════
+def _check_addr(prov: str, dist: str, addr: str) -> tuple:
+    """
+    ตรวจสอบว่าที่อยู่ใน รายละเอียด ตรงกับ จังหวัด/อำเภอ ที่บันทึกไว้
+    คืนค่า (ok: bool, warning_msg: str)
+    """
+    if not addr:
+        return True, ""  # ไม่มีที่อยู่ — ข้ามการตรวจ
+
+    miss = []
+
+    # ── ตรวจจังหวัด ──────────────────────────────────────────────────────────
+    if prov:
+        prov_variants = [prov]
+        if prov == "กรุงเทพมหานคร":
+            prov_variants += ["กรุงเทพฯ", "กทม", "กทม.", "กรุงเทพ"]
+        ok_prov = any(v in addr for v in prov_variants if v)
+        if not ok_prov:
+            miss.append(f"ไม่พบจังหวัด '{prov}'")
+
+    # ── ตรวจอำเภอ/เขต ────────────────────────────────────────────────────────
+    if dist:
+        dist_norm = _norm_dist(dist)
+        ok_dist = (dist in addr) or (dist_norm in addr) or (
+            f"อำเภอ{dist_norm}" in addr) or (f"เขต{dist_norm}" in addr
+        )
+        if not ok_dist:
+            miss.append(f"ไม่พบอำเภอ '{dist}'")
+
+    if miss:
+        return False, " | ".join(miss)
+    return True, ""
+
+
 @st.cache_data(show_spinner="📂 โหลดข้อมูล…")
 def load_and_classify() -> pd.DataFrame:
     if not os.path.exists(BRANCH_JSON):
@@ -258,6 +294,8 @@ def load_and_classify() -> pd.DataFrame:
         except: lon=0.
 
         dist = str(info.get("อำเภอ","") or "").strip()
+        addr = str(info.get("รายละเอียด","") or "").strip()
+        addr_ok, addr_warn_msg = _check_addr(prov, dist, addr)
         rz = PROVINCE_ZONE.get(prov)
         if rz == "__BKK__":
             zone   = f"BKK_{dist}" if dist else "BKK_ไม่ระบุ"
@@ -289,6 +327,9 @@ def load_and_classify() -> pd.DataFrame:
             name=str(info.get("สาขา","")),
             province=prov,
             district=dist,
+            addr=addr,
+            addr_ok=addr_ok,
+            addr_warn=addr_warn_msg,
             lat=lat, lon=lon,
             truck=str(info.get("MaxTruckType","") or ""),
             zone=zone, region=region, label=label, color=color,
@@ -423,6 +464,25 @@ def build_map(df: pd.DataFrame):
                 ).add_to(fg)
 
         fg.add_to(m)
+
+    # ── Warning markers: ที่อยู่ไม่ตรงโซน ─────────────────────────────────────
+    warn_rows = [r for _, r in df.iterrows()
+                 if not r.get("addr_ok", True) and r["lat"] and r["lon"] and r["lat"] != 0]
+    if warn_rows:
+        warn_fg = folium.FeatureGroup(name=f"⚠️ ที่อยู่ไม่ตรง ({len(warn_rows)})", show=True)
+        for r in warn_rows:
+            tip_warn = (
+                f"<b style='color:#FF6B6B'>⚠️ {r['code']}</b><br>{r['name']}<br>"
+                f"<span style='color:#FFA726'>จังหวัด: {r['province']} | อำเภอ: {r['district']}</span><br>"
+                f"<span style='color:#EF9A9A;font-size:11px'>{r['addr_warn']}</span>"
+            )
+            folium.CircleMarker(
+                location=[r["lat"], r["lon"]],
+                radius=9, color="#FF1744", weight=3,
+                fill=True, fill_color="#FF6B6B", fill_opacity=0.7,
+                tooltip=folium.Tooltip(tip_warn, sticky=False),
+            ).add_to(warn_fg)
+        warn_fg.add_to(m)
 
     folium.LayerControl(collapsed=True).add_to(m)
     return m
@@ -589,16 +649,19 @@ if sel_dist != "ทั้งหมด": view = view[view["district"]==sel_dist]
 if hide_unk:               view = view[view["region"]!="❓ ไม่ระบุ"]
 
 # ─── top metrics ──────────────────────────────────────────────────────────────
-c1,c2,c3,c4 = st.columns(4)
+c1,c2,c3,c4,c5 = st.columns(5)
 c1.markdown(f'<div class="mbox"><div class="v">{len(view):,}</div><div class="l">📍 สาขา</div></div>', unsafe_allow_html=True)
 c2.markdown(f'<div class="mbox"><div class="v">{view["zone"].nunique()}</div><div class="l">🗂️ โซน</div></div>', unsafe_allow_html=True)
 c3.markdown(f'<div class="mbox"><div class="v">{view[view["region"]=="🏙️ กรุงเทพฯ"]["zone"].nunique()}</div><div class="l">🏙️ BKK sub</div></div>', unsafe_allow_html=True)
 c4.markdown(f'<div class="mbox"><div class="v">{int((view["region"]=="❓ ไม่ระบุ").sum())}</div><div class="l">❓ ไม่ระบุ</div></div>', unsafe_allow_html=True)
+_warn_count = int((~view["addr_ok"]).sum())
+_warn_style = "background:#7f1d1d" if _warn_count > 0 else "background:#1e2937"
+c5.markdown(f'<div class="mbox" style="{_warn_style}"><div class="v">{_warn_count:,}</div><div class="l">⚠️ ที่อยู่ไม่ตรง</div></div>', unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ─── tabs ─────────────────────────────────────────────────────────────────────
-tab_map, tab_zones, tab_tbl = st.tabs(["🗺️ แผนที่","🎨 โซนทั้งหมด","📋 ตาราง"])
+tab_map, tab_zones, tab_tbl, tab_warn = st.tabs(["🗺️ แผนที่","🎨 โซนทั้งหมด","📋 ตาราง","⚠️ ที่อยู่ไม่ตรง"])
 
 # ── Map ────────────────────────────────────────────────────────────────────────
 with tab_map:
@@ -688,3 +751,40 @@ with tab_tbl:
         "⬇️ CSV (ตามตัวกรอง)", tbl.to_csv(index=False).encode("utf-8-sig"),
         "filtered_zones.csv","text/csv",
     )
+
+# ── Address Mismatch Warnings ──────────────────────────────────────────────────
+with tab_warn:
+    warn_df = df[~df["addr_ok"]].copy()
+    if warn_df.empty:
+        st.success("✅ ที่อยู่ทุกสาขาตรงกับจังหวัด/อำเภอที่บันทึกไว้")
+    else:
+        st.error(f"⚠️ พบ {len(warn_df):,} สาขา ที่ที่อยู่ในฟิลด์ **รายละเอียด** ไม่ตรงกับ จังหวัด/อำเภอ ที่บันทึกไว้")
+        st.caption("กรุณาตรวจสอบและแก้ไขข้อมูลใน branch_data.json หรือ Google Sheets")
+
+        # Summary by zone
+        zone_warn_counts = warn_df.groupby(["region","zone","label"])["code"].count().reset_index()
+        zone_warn_counts.columns = ["ภาค","โซน","ชื่อโซน","จำนวนสาขาผิด"]
+        zone_warn_counts = zone_warn_counts.sort_values(["ภาค","จำนวนสาขาผิด"], ascending=[True,False])
+
+        with st.expander(f"📊 สรุปตามโซน ({len(zone_warn_counts)} โซนมีปัญหา)", expanded=True):
+            st.dataframe(zone_warn_counts, use_container_width=True, hide_index=True)
+
+        # Detail table
+        wtbl = warn_df[["code","name","province","district","addr","zone","label","addr_warn"]].copy()
+        wtbl.columns = ["รหัส","ชื่อสาขา","จังหวัด (บันทึก)","อำเภอ (บันทึก)","ที่อยู่จริง","โซน","ชื่อโซน","ปัญหาที่พบ"]
+        st.markdown("#### 📋 รายละเอียดสาขาที่มีปัญหา")
+        st.dataframe(
+            wtbl,
+            use_container_width=True,
+            hide_index=True,
+            height=min(600, 40 + 35 * len(wtbl)),
+            column_config={
+                "ที่อยู่จริง": st.column_config.TextColumn(width="large"),
+                "ปัญหาที่พบ": st.column_config.TextColumn(width="medium"),
+            }
+        )
+        st.download_button(
+            "⬇️ CSV รายการที่อยู่ไม่ตรง",
+            wtbl.to_csv(index=False).encode("utf-8-sig"),
+            "addr_mismatch.csv", "text/csv",
+        )
