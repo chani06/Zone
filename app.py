@@ -1,11 +1,10 @@
 """
 zone_viewer.py — แผนที่โซนจัดส่งสาขา (Standalone · Deploy-ready)
 รันบนเครื่อง : streamlit run zone_viewer.py --server.port 8889
-Deploy       : streamlit.io/cloud  →  point to this file
+Deploy : streamlit.io/cloud  →  point to this file
 """
 import json, math, io, os
 from collections import defaultdict
-
 import pandas as pd
 import streamlit as st
 
@@ -104,12 +103,12 @@ PROVINCE_ZONE: dict = {
 }
 
 ZONE_REGION: dict = {
-    "ปริมณฑล":  "🌆 ปริมณฑล",
-    "เหนือ":    "🏔️ เหนือ",
-    "อีสาน":    "🌾 อีสาน",
-    "ตะวันออก": "🌊 ตะวันออก",
-    "ตะวันตก":  "🌳 ตะวันตก",
-    "ใต้":      "🏝️ ใต้",
+    "ปริมณฑล":  "ปริมณฑล",
+    "เหนือ":    "เหนือ",
+    "อีสาน":    "อีสาน",
+    "ตะวันออก": "ตะวันออก",
+    "ตะวันตก":  "ตะวันตก",
+    "ใต้":      "ใต้",
 }
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -241,39 +240,85 @@ def _prov_key(zone: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# ADDRESS VALIDATION
+# COORDINATE VALIDATION (พิกัด ละ/ลอง ตรงกับจังหวัด/อำเภอที่บันทึกหรือไม่)
 # ════════════════════════════════════════════════════════════════════════════════
-def _check_addr(prov: str, dist: str, addr: str) -> tuple:
+_BKK_ALIAS = {"กรุงเทพมหานคร", "กรุงเทพฯ", "กทม", "กทม.", "กรุงเทพ"}
+
+
+def _build_coord_checker():
     """
-    ตรวจสอบว่าที่อยู่ใน รายละเอียด ตรงกับ จังหวัด/อำเภอ ที่บันทึกไว้
-    คืนค่า (ok: bool, warning_msg: str)
+    สร้าง spatial index จาก GeoJSON อำเภอ เพื่อทำ point-in-polygon
+    คืน function check(lat, lon, rec_prov, rec_dist) → (ok, msg)
+    หรือ None ถ้า shapely ไม่พร้อม / ไม่มี GeoJSON
     """
-    if not addr:
-        return True, ""  # ไม่มีที่อยู่ — ข้ามการตรวจ
+    geo = _thai_geo()
+    if not geo or not geo.get("features"):
+        return None
+    try:
+        from shapely.geometry import shape, Point
+        from shapely.strtree import STRtree
 
-    miss = []
+        feats = geo["features"]
+        shp_list, prov_list, dist_list = [], [], []
+        for feat in feats:
+            try:
+                g = shape(feat["geometry"])
+                if not g.is_valid:
+                    g = g.buffer(0)
+                props = feat.get("properties", {})
+                # GADM: NL_NAME_* = ชื่อไทย (อาจมี prefix "จังหวัด"/"อำเภอ")
+                pv = str(props.get("NL_NAME_1") or props.get("NAME_1") or "").strip()
+                dv = str(props.get("NL_NAME_2") or props.get("NAME_2") or "").strip()
+                shp_list.append(g)
+                prov_list.append(_norm_prov(pv))
+                dist_list.append(_norm_dist(dv))
+            except Exception:
+                shp_list.append(None)
+                prov_list.append("")
+                dist_list.append("")
 
-    # ── ตรวจจังหวัด ──────────────────────────────────────────────────────────
-    if prov:
-        prov_variants = [prov]
-        if prov == "กรุงเทพมหานคร":
-            prov_variants += ["กรุงเทพฯ", "กทม", "กทม.", "กรุงเทพ"]
-        ok_prov = any(v in addr for v in prov_variants if v)
-        if not ok_prov:
-            miss.append(f"ไม่พบจังหวัด '{prov}'")
+        valid_idx  = [i for i, s in enumerate(shp_list) if s is not None]
+        valid_shps = [shp_list[i] for i in valid_idx]
+        tree       = STRtree(valid_shps)
 
-    # ── ตรวจอำเภอ/เขต ────────────────────────────────────────────────────────
-    if dist:
-        dist_norm = _norm_dist(dist)
-        ok_dist = (dist in addr) or (dist_norm in addr) or (
-            f"อำเภอ{dist_norm}" in addr) or (f"เขต{dist_norm}" in addr
-        )
-        if not ok_dist:
-            miss.append(f"ไม่พบอำเภอ '{dist}'")
+        def check(lat: float, lon: float, rec_prov: str, rec_dist: str):
+            if not lat or not lon:
+                return True, ""  # ไม่มีพิกัด — ข้ามการตรวจ
+            pt = Point(float(lon), float(lat))  # GeoJSON ใช้ (lon, lat)
+            try:
+                hits = tree.query(pt, predicate="intersects")
+            except TypeError:  # shapely 1.x fallback
+                hits = [j for j, s in enumerate(valid_shps) if s.contains(pt)]
 
-    if miss:
-        return False, " | ".join(miss)
-    return True, ""
+            if len(hits) == 0:
+                return True, ""  # ไม่พบ polygon — อาจอยู่นอกแผนที่ ข้ามการตรวจ
+
+            # ใช้ polygon แรกที่ตรงกัน
+            actual_prov = prov_list[valid_idx[hits[0]]]
+            actual_dist = dist_list[valid_idx[hits[0]]]
+
+            rec_pn = _norm_prov(rec_prov)
+            rec_dn = _norm_dist(rec_dist)
+
+            warns = []
+            # ── ตรวจจังหวัด ────────────────────────────────────────────────
+            if actual_prov and rec_pn:
+                bkk_actual = actual_prov in _BKK_ALIAS or "กรุงเทพ" in actual_prov
+                bkk_rec    = rec_pn    in _BKK_ALIAS or "กรุงเทพ" in rec_pn
+                if not (bkk_actual and bkk_rec) and actual_prov != rec_pn:
+                    warns.append(f"พิกัดอยู่ในจังหวัด '{actual_prov}' แต่บันทึก '{rec_pn}'")
+
+            # ── ตรวจอำเภอ/เขต ──────────────────────────────────────────────
+            if actual_dist and rec_dn and actual_dist != rec_dn:
+                warns.append(f"อำเภอจากพิกัด '{actual_dist}' ≠ บันทึก '{rec_dn}'")
+
+            if warns:
+                return False, " | ".join(warns)
+            return True, ""
+
+        return check
+    except Exception:
+        return None
 
 
 @st.cache_data(show_spinner="📂 โหลดข้อมูล…")
@@ -282,6 +327,9 @@ def load_and_classify() -> pd.DataFrame:
         return pd.DataFrame()
     with open(BRANCH_JSON, encoding="utf-8") as f:
         raw = json.load(f)
+
+    # สร้าง checker ครั้งเดียว (ใช้ spatial index)
+    _coord_check = _build_coord_checker()
 
     rows = []
     for code, info in raw.items():
@@ -295,7 +343,10 @@ def load_and_classify() -> pd.DataFrame:
 
         dist = str(info.get("อำเภอ","") or "").strip()
         addr = str(info.get("รายละเอียด","") or "").strip()
-        addr_ok, addr_warn_msg = _check_addr(prov, dist, addr)
+        if _coord_check:
+            addr_ok, addr_warn_msg = _coord_check(lat, lon, prov, dist)
+        else:
+            addr_ok, addr_warn_msg = True, ""  # shapely ไม่พร้อม — ข้ามการตรวจ
         rz = PROVINCE_ZONE.get(prov)
         if rz == "__BKK__":
             zone   = f"BKK_{dist}" if dist else "BKK_ไม่ระบุ"
@@ -330,6 +381,7 @@ def load_and_classify() -> pd.DataFrame:
             addr=addr,
             addr_ok=addr_ok,
             addr_warn=addr_warn_msg,
+            coord_checked=(_coord_check is not None),
             lat=lat, lon=lon,
             truck=str(info.get("MaxTruckType","") or ""),
             zone=zone, region=region, label=label, color=color,
@@ -755,23 +807,26 @@ with tab_tbl:
 # ── Address Mismatch Warnings ──────────────────────────────────────────────────
 with tab_warn:
     warn_df = df[~df["addr_ok"]].copy()
-    if warn_df.empty:
-        st.success("✅ ที่อยู่ทุกสาขาตรงกับจังหวัด/อำเภอที่บันทึกไว้")
+    shapely_ok = bool(df["coord_checked"].any()) if "coord_checked" in df.columns else False
+    if not shapely_ok:
+        st.warning("⚠️ ไม่สามารถตรวจได้ — ต้องติดตั้ง `shapely` ก่อน (`pip install shapely`)")
+    elif warn_df.empty:
+        st.success("✅ พิกัด (ละ/ลอง) ทุกสาขาตรงกับจังหวัด/อำเภอที่บันทึกไว้")
     else:
-        st.error(f"⚠️ พบ {len(warn_df):,} สาขา ที่ที่อยู่ในฟิลด์ **รายละเอียด** ไม่ตรงกับ จังหวัด/อำเภอ ที่บันทึกไว้")
-        st.caption("กรุณาตรวจสอบและแก้ไขข้อมูลใน branch_data.json หรือ Google Sheets")
+        st.error(f"⚠️ พบ {len(warn_df):,} สาขา ที่**พิกัด (ละ/ลอง) ไม่ตรงกับจังหวัด/อำเภอ**ที่บันทึกไว้")
+        st.caption("ตรวจด้วย point-in-polygon (GeoJSON ขอบเขตอำเภอ) — อาจเป็นพิกัดผิด หรือจังหวัด/อำเภอที่บันทึกผิด")
 
         # Summary by zone
         zone_warn_counts = warn_df.groupby(["region","zone","label"])["code"].count().reset_index()
-        zone_warn_counts.columns = ["ภาค","โซน","ชื่อโซน","จำนวนสาขาผิด"]
-        zone_warn_counts = zone_warn_counts.sort_values(["ภาค","จำนวนสาขาผิด"], ascending=[True,False])
+        zone_warn_counts.columns = ["ภาค","โซน","ชื่อโซน","จำนวนสาขา"]
+        zone_warn_counts = zone_warn_counts.sort_values(["ภาค","จำนวนสาขา"], ascending=[True,False])
 
         with st.expander(f"📊 สรุปตามโซน ({len(zone_warn_counts)} โซนมีปัญหา)", expanded=True):
             st.dataframe(zone_warn_counts, use_container_width=True, hide_index=True)
 
         # Detail table
-        wtbl = warn_df[["code","name","province","district","addr","zone","label","addr_warn"]].copy()
-        wtbl.columns = ["รหัส","ชื่อสาขา","จังหวัด (บันทึก)","อำเภอ (บันทึก)","ที่อยู่จริง","โซน","ชื่อโซน","ปัญหาที่พบ"]
+        wtbl = warn_df[["code","name","province","district","lat","lon","zone","label","addr_warn"]].copy()
+        wtbl.columns = ["รหัส","ชื่อสาขา","จังหวัด (บันทึก)","อำเภอ (บันทึก)","ละติจูด","ลองจิจูด","โซน","ชื่อโซน","พิกัดผิด (จริงอยู่ที่)"]
         st.markdown("#### 📋 รายละเอียดสาขาที่มีปัญหา")
         st.dataframe(
             wtbl,
@@ -779,12 +834,11 @@ with tab_warn:
             hide_index=True,
             height=min(600, 40 + 35 * len(wtbl)),
             column_config={
-                "ที่อยู่จริง": st.column_config.TextColumn(width="large"),
-                "ปัญหาที่พบ": st.column_config.TextColumn(width="medium"),
+                "พิกัดผิด (จริงอยู่ที่)": st.column_config.TextColumn(width="large"),
             }
         )
         st.download_button(
-            "⬇️ CSV รายการที่อยู่ไม่ตรง",
+            "⬇️ CSV พิกัดไม่ตรง",
             wtbl.to_csv(index=False).encode("utf-8-sig"),
-            "addr_mismatch.csv", "text/csv",
+            "coord_mismatch.csv", "text/csv",
         )
