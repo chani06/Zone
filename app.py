@@ -172,7 +172,7 @@ def _norm_prov(s: str) -> str:
     """Strip จังหวัด prefix from GADM NL_NAME_1 (e.g. 'จังหวัดเชียงใหม่' → 'เชียงใหม่')."""
     s = str(s).strip()
     if s.startswith("จังหวัด"):
-        return s[6:].strip()
+        return s[len("จังหวัด"):].strip()
     return s
 
 @st.cache_data(show_spinner="🌏 โหลดขอบเขตอำเภอ…", ttl=86400*7)
@@ -244,6 +244,48 @@ def _prov_key(zone: str) -> str:
 # ════════════════════════════════════════════════════════════════════════════════
 _BKK_ALIAS = {"กรุงเทพมหานคร", "กรุงเทพฯ", "กทม", "กทม.", "กรุงเทพ"}
 
+# GADM NAME_1 (English) → Thai province  (NL_NAME_1 ใน GADM มีข้อมูลผิดบางจังหวัด)
+_GADM_NAME1_TO_THAI: dict = {
+    "AmnatCharoen": "อำนาจเจริญ", "AngThong": "อ่างทอง",
+    "BangkokMetropolis": "กรุงเทพมหานคร", "BuengKan": "บึงกาฬ",
+    "BuriRam": "บุรีรัมย์", "Chachoengsao": "ฉะเชิงเทรา",
+    "ChaiNat": "ชัยนาท", "Chaiyaphum": "ชัยภูมิ",
+    "Chanthaburi": "จันทบุรี", "ChiangMai": "เชียงใหม่",
+    "ChiangRai": "เชียงราย", "ChonBuri": "ชลบุรี",
+    "Chumphon": "ชุมพร", "Kalasin": "กาฬสินธุ์",
+    "KamphaengPhet": "กำแพงเพชร", "Kanchanaburi": "กาญจนบุรี",
+    "KhonKaen": "ขอนแก่น", "Krabi": "กระบี่",
+    "Lampang": "ลำปาง", "Lamphun": "ลำพูน",
+    "Loei": "เลย", "LopBuri": "ลพบุรี",
+    "MaeHongSon": "แม่ฮ่องสอน", "MahaSarakham": "มหาสารคาม",
+    "Mukdahan": "มุกดาหาร", "NakhonNayok": "นครนายก",
+    "NakhonPathom": "นครปฐม", "NakhonPhanom": "นครพนม",
+    "NakhonRatchasima": "นครราชสีมา", "NakhonSawan": "นครสวรรค์",
+    "NakhonSiThammarat": "นครศรีธรรมราช", "Nan": "น่าน",
+    "Narathiwat": "นราธิวาส", "NongBuaLamPhu": "หนองบัวลำภู",
+    "NongKhai": "หนองคาย", "Nonthaburi": "นนทบุรี",
+    "PathumThani": "ปทุมธานี", "Pattani": "ปัตตานี",
+    "Phangnga": "พังงา", "Phatthalung": "พัทลุง",
+    "Phayao": "พะเยา", "Phetchabun": "เพชรบูรณ์",
+    "Phetchaburi": "เพชรบุรี", "Phichit": "พิจิตร",
+    "Phitsanulok": "พิษณุโลก", "PhraNakhonSiAyutthaya": "พระนครศรีอยุธยา",
+    "Phrae": "แพร่", "Phuket": "ภูเก็ต",
+    "PrachinBuri": "ปราจีนบุรี", "PrachuapKhiriKhan": "ประจวบคีรีขันธ์",
+    "Ranong": "ระนอง", "Ratchaburi": "ราชบุรี",
+    "Rayong": "ระยอง", "RoiEt": "ร้อยเอ็ด",
+    "SaKaeo": "สระแก้ว", "SakonNakhon": "สกลนคร",
+    "SamutPrakan": "สมุทรปราการ", "SamutSakhon": "สมุทรสาคร",
+    "SamutSongkhram": "สมุทรสงคราม", "Saraburi": "สระบุรี",
+    "Satun": "สตูล", "SiSaKet": "ศรีสะเกษ",
+    "SingBuri": "สิงห์บุรี", "Songkhla": "สงขลา",
+    "Sukhothai": "สุโขทัย", "SuphanBuri": "สุพรรณบุรี",
+    "SuratThani": "สุราษฎร์ธานี", "Surin": "สุรินทร์",
+    "Tak": "ตาก", "Trang": "ตรัง", "Trat": "ตราด",
+    "UbonRatchathani": "อุบลราชธานี", "UdonThani": "อุดรธานี",
+    "UthaiThani": "อุทัยธานี", "Uttaradit": "อุตรดิตถ์",
+    "Yala": "ยะลา", "Yasothon": "ยโสธร",
+}
+
 
 def _build_coord_checker():
     """
@@ -266,14 +308,12 @@ def _build_coord_checker():
                 if not g.is_valid:
                     g = g.buffer(0)
                 props = feat.get("properties", {})
-                # GADM: NL_NAME_* = ชื่อไทย — ใช้เฉพาะถ้าเป็นภาษาไทย (มีอักขระไทย)
-                def _thai_only(s):
-                    s = str(s or "").strip()
-                    return s if any("\u0e00" <= c <= "\u0e7f" for c in s) else ""
-                pv = _thai_only(props.get("NL_NAME_1")) or _thai_only(props.get("NAME_1"))
+                # ใช้ NAME_1 (อังกฤษ) → Thai map เพราะ NL_NAME_1 ใน GADM มีข้อมูลผิด
+                pv = _GADM_NAME1_TO_THAI.get(str(props.get("NAME_1") or "").strip(), "")
+                # NL_NAME_2 สำหรับอำเภอ/เขต — กรองเฉพาะภาษาไทย
                 dv = _thai_only(props.get("NL_NAME_2")) or _thai_only(props.get("NAME_2"))
                 shp_list.append(g)
-                prov_list.append(_norm_prov(pv))
+                prov_list.append(pv)  # already clean Thai name from _GADM_NAME1_TO_THAI
                 dist_list.append(_norm_dist(dv))
             except Exception:
                 shp_list.append(None)
@@ -300,22 +340,35 @@ def _build_coord_checker():
             actual_prov = prov_list[valid_idx[hits[0]]]
             actual_dist = dist_list[valid_idx[hits[0]]]
 
-            rec_pn = _norm_prov(rec_prov)
+            if not actual_prov:
+                return True, ""  # ไม่มีชื่อจังหวัดใน GeoJSON — ข้ามการตรวจ
+
+            rec_pn = _norm_prov(rec_prov)  # ตัด "จังหวัด" prefix จากข้อมูลสาขา
             rec_dn = _norm_dist(rec_dist)
 
             warns = []
             # ── ตรวจจังหวัด ────────────────────────────────────────────────
             prov_ok = True
             if actual_prov and rec_pn:
-                bkk_actual = actual_prov in _BKK_ALIAS or "กรุงเทพ" in actual_prov
-                bkk_rec    = rec_pn    in _BKK_ALIAS or "กรุงเทพ" in rec_pn
-                if not (bkk_actual and bkk_rec) and actual_prov != rec_pn:
-                    warns.append(f"พิกัดอยู่ในจังหวัด '{actual_prov}' แต่บันทึก '{rec_pn}'")
+                bkk_a = actual_prov in _BKK_ALIAS or "กรุงเทพ" in actual_prov
+                bkk_r = rec_pn in _BKK_ALIAS or "กรุงเทพ" in rec_pn
+                if not (bkk_a and bkk_r) and actual_prov != rec_pn:
+                    warns.append(f"พิกัดอยู่ '{actual_prov}' แต่บันทึก '{rec_pn}'")
                     prov_ok = False
 
             # ── ตรวจอำเภอ/เขต (เฉพาะเมื่อจังหวัดตรงกัน) ─────────────────
-            if prov_ok and actual_dist and rec_dn and actual_dist != rec_dn:
-                warns.append(f"อำเภอจากพิกัด '{actual_dist}' ≠ บันทึก '{rec_dn}'")
+            if prov_ok and actual_dist and rec_dn:
+                # normalize: เก็บเฉพาะอักขระไทย เพื่อจัดการ GADM ตัดปลาย/มีอักขระแปลก
+                def _th_only_str(s):
+                    return "".join(c for c in s if "\u0e00" <= c <= "\u0e7f")
+                a_n = _th_only_str(actual_dist)
+                r_n = _th_only_str(rec_dn)
+                # ถือว่าตรงถ้า: เท่ากัน, หรือหนึ่งเป็น prefix ของอีกอัน (รองรับชื่อถูกตัดใน GADM)
+                dist_match = (a_n == r_n) or (a_n and r_n and (
+                    r_n.startswith(a_n) or a_n.startswith(r_n)
+                ) and min(len(a_n), len(r_n)) >= 3)
+                if not dist_match:
+                    warns.append(f"อำเภอพิกัด '{actual_dist}' ≠ บันทึก '{rec_dn}'")
 
             if warns:
                 return False, " | ".join(warns)
